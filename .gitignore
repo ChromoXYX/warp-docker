@@ -3,3 +3,6 @@ data/
 # debug github actions
 .secrets
 .vars
+
+# local runtime overrides
+.env
