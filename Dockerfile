@@ -25,7 +25,7 @@ RUN case ${TARGETPLATFORM} in \
     echo "Building for ${TARGETPLATFORM} with GOST ${GOST_VERSION}" &&\
     apt-get update && \
     apt-get upgrade -y && \
-    apt-get install -y curl gnupg lsb-release sudo jq ipcalc && \
+    apt-get install -y curl gnupg lsb-release sudo jq ipcalc netcat-openbsd iputils-ping && \
     curl https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg && \
     echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list && \
     apt-get update && \

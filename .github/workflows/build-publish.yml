@@ -1,6 +1,9 @@
 name: Build and publish arm64 image to GitHub Release
 
 on:
+  push:
+    tags:
+      - '*'
   workflow_dispatch:
     inputs:
       GOST_VERSION:
@@ -51,27 +54,15 @@ jobs:
         run: |
           WARP_VERSION="${{ steps.get-warp-client-version.outputs.WARP_VERSION }}"
           GOST_VERSION="${{ steps.get-gost-version.outputs.GOST_VERSION }}"
-          TAG="v${WARP_VERSION}-${GOST_VERSION}"
-          IMAGE_TAG="warp-docker:${WARP_VERSION}-${GOST_VERSION}"
-          ARTIFACT="warp-docker-arm64-${WARP_VERSION}-${GOST_VERSION}.tar.gz"
+          # On tag push, github.ref_name is the git tag (e.g. "iso-1").
+          # On manual workflow_dispatch from a branch, it's the branch name (used only for ad-hoc test builds).
+          GIT_REF="${{ github.ref_name }}"
+          TAG="${GIT_REF}-v${WARP_VERSION}-${GOST_VERSION}"
+          IMAGE_TAG="warp-docker:${GIT_REF}-${WARP_VERSION}-${GOST_VERSION}"
+          ARTIFACT="warp-docker-arm64-${GIT_REF}-${WARP_VERSION}-${GOST_VERSION}.tar.gz"
           echo "TAG=${TAG}" >> "$GITHUB_OUTPUT"
           echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           echo "ARTIFACT=${ARTIFACT}" >> "$GITHUB_OUTPUT"
-
-      - name: Fail if release tag already exists
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.meta.outputs.TAG }}
-        run: |
-          status=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}")
-          if [ "${status}" = "200" ]; then
-            echo "Release tag ${TAG} already exists. Aborting."
-            exit 1
-          fi
-          echo "Release tag ${TAG} does not exist (HTTP ${status}). Proceeding."
 
       - name: Build image (arm64, load to local docker)
         uses: docker/build-push-action@v5
@@ -108,3 +99,5 @@ jobs:
           files: ${{ steps.meta.outputs.ARTIFACT }}
           fail_on_unmatched_files: true
           make_latest: "true"
+Git tag: `${{ github.ref_name }}`
+            

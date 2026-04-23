@@ -14,6 +14,13 @@ services:
       - WARP_SLEEP=2
       # - WARP_LICENSE_KEY= # optional
       # - WARP_ENABLE_NAT=1 # enable nat
+      # === LAN / loopback isolation (default on) ===
+      - WARP_ISOLATE_LAN=1
+      # - WARP_ISOLATE_ALLOW_CIDR=192.168.99.10/32,10.20.30.0/24
+      # === Startup probes (any failure aborts container) ===
+      # - WARP_ISOLATE_TEST_REACH=1.1.1.1:443
+      # - WARP_ISOLATE_TEST_TCP=192.168.1.1:80,10.0.0.1:22
+      # - WARP_ISOLATE_TEST_PING=192.168.1.1
     cap_add:
       # Docker already have them, these are for podman users
       - MKNOD

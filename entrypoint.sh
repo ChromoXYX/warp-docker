@@ -3,6 +3,14 @@
 # exit when any command fails
 set -e
 
+# === Sanity check: physical interface must be exactly 'eth0' ===
+# Personal-use image: hard fail otherwise to avoid silent LAN leaks when isolation rules are scoped to known iface names.
+non_lo_ifaces=$(ip -o link show | awk -F': ' '{print $2}' | awk -F'@' '{print $1}' | grep -vE '^(lo|CloudflareWARP)$' || true)
+if [ "$(echo "$non_lo_ifaces" | tr '\n' ' ' | xargs)" != "eth0" ]; then
+    echo "FATAL: expected exactly one physical interface named 'eth0', got: [$non_lo_ifaces]" >&2
+    exit 1
+fi
+
 # create a tun device if not exist
 # allow passing device to ensure compatibility with Podman
 if [ ! -e /dev/net/tun ]; then
@@ -73,6 +81,73 @@ if [ -n "$WARP_ENABLE_NAT" ]; then
     sudo nft add table ip6 mangle
     sudo nft add chain ip6 mangle forward { type filter hook forward priority mangle \; }
     sudo nft add rule ip6 mangle forward tcp flags syn tcp option maxseg size set rt mtu
+fi
+
+# === LAN / loopback isolation ===
+# WARP_ISOLATE_LAN=1 (default): drop any new connection from container -> RFC1918/loopback/link-local on physical iface.
+# - lo and CloudflareWARP are exempt (gost<->warp-cli proxy on lo; user app->WARP tun is fine, real egress packets target Cloudflare public IPs).
+# - established/related accepted so host->container:1080 reverse path works.
+# WARP_ISOLATE_ALLOW_CIDR: comma-separated CIDRs to allow as exceptions.
+if [ "${WARP_ISOLATE_LAN:-1}" = "1" ]; then
+    echo "[ISOLATE] Applying LAN isolation rules..."
+    sudo nft add table inet isolate
+    sudo nft add chain inet isolate output '{ type filter hook output priority 0 ; }'
+    sudo nft add rule inet isolate output ct state established,related accept
+    sudo nft add rule inet isolate output oifname { "lo", "CloudflareWARP" } accept
+    if [ -n "$WARP_ISOLATE_ALLOW_CIDR" ]; then
+        for cidr in $(echo "$WARP_ISOLATE_ALLOW_CIDR" | tr ',' ' '); do
+            echo "[ISOLATE] Allowing exception: $cidr"
+            if [[ "$cidr" == *:* ]]; then
+                sudo nft add rule inet isolate output ip6 daddr "$cidr" accept
+            else
+                sudo nft add rule inet isolate output ip daddr "$cidr" accept
+            fi
+        done
+    fi
+    sudo nft add rule inet isolate output ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 127.0.0.0/8, 224.0.0.0/4 } ct state new drop
+    sudo nft add rule inet isolate output ip6 daddr { fc00::/7, fe80::/10, ::1/128, ff00::/8 } ct state new drop
+fi
+
+# === Startup probes ===
+# WARP_ISOLATE_TEST_REACH: comma-separated host:port that MUST be reachable (public sanity).
+# WARP_ISOLATE_TEST_TCP:   comma-separated host:port that MUST NOT be reachable.
+# WARP_ISOLATE_TEST_PING:  comma-separated host that MUST NOT respond to ping.
+probe_fail=0
+if [ -n "$WARP_ISOLATE_TEST_REACH" ]; then
+    for hp in $(echo "$WARP_ISOLATE_TEST_REACH" | tr ',' ' '); do
+        host="${hp%:*}"; port="${hp##*:}"
+        if nc -zw3 "$host" "$port" >/dev/null 2>&1; then
+            echo "[PROBE] REACH ok: $hp"
+        else
+            echo "[PROBE] FAIL REACH (expected reachable): $hp" >&2
+            probe_fail=1
+        fi
+    done
+fi
+if [ -n "$WARP_ISOLATE_TEST_TCP" ]; then
+    for hp in $(echo "$WARP_ISOLATE_TEST_TCP" | tr ',' ' '); do
+        host="${hp%:*}"; port="${hp##*:}"
+        if nc -zw3 "$host" "$port" >/dev/null 2>&1; then
+            echo "[PROBE] FAIL TCP (expected blocked): $hp" >&2
+            probe_fail=1
+        else
+            echo "[PROBE] TCP blocked ok: $hp"
+        fi
+    done
+fi
+if [ -n "$WARP_ISOLATE_TEST_PING" ]; then
+    for host in $(echo "$WARP_ISOLATE_TEST_PING" | tr ',' ' '); do
+        if ping -c1 -W2 "$host" >/dev/null 2>&1; then
+            echo "[PROBE] FAIL PING (expected blocked): $host" >&2
+            probe_fail=1
+        else
+            echo "[PROBE] PING blocked ok: $host"
+        fi
+    done
+fi
+if [ "$probe_fail" -ne 0 ]; then
+    echo "FATAL: isolation probes failed, refusing to start proxy." >&2
+    exit 1
 fi
 
 # start the proxy
