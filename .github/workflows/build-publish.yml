@@ -1,4 +1,4 @@
-name: Build and publish arm64 image to GitHub Release
+name: Build and publish multi-arch images to GitHub Release
 
 on:
   push:
@@ -15,15 +15,13 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    runs-on: ubuntu-24.04-arm
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      TAG: ${{ steps.meta.outputs.TAG }}
+      WARP_VERSION: ${{ steps.get-warp-client-version.outputs.WARP_VERSION }}
+      GOST_VERSION: ${{ steps.get-gost-version.outputs.GOST_VERSION }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
       - name: Get gost version
         id: get-gost-version
         run: |
@@ -33,7 +31,6 @@ jobs:
             echo "GOST_VERSION=${{ github.event.inputs.GOST_VERSION }}" >> "$GITHUB_OUTPUT"
           fi
 
-      # gost version must be <number>.<number>.<number>
       - name: Verify gost version
         run: |
           if [[ ! "${{ steps.get-gost-version.outputs.GOST_VERSION }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -54,34 +51,11 @@ jobs:
         run: |
           WARP_VERSION="${{ steps.get-warp-client-version.outputs.WARP_VERSION }}"
           GOST_VERSION="${{ steps.get-gost-version.outputs.GOST_VERSION }}"
-          # On tag push, github.ref_name is the git tag (e.g. "iso-1").
-          # On manual workflow_dispatch from a branch, it's the branch name (used only for ad-hoc test builds).
           GIT_REF="${{ github.ref_name }}"
           TAG="${GIT_REF}-v${WARP_VERSION}-${GOST_VERSION}"
-          IMAGE_TAG="warp-docker:${GIT_REF}-${WARP_VERSION}-${GOST_VERSION}"
-          ARTIFACT="warp-docker-arm64-${GIT_REF}-${WARP_VERSION}-${GOST_VERSION}.tar.gz"
           echo "TAG=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
-          echo "ARTIFACT=${ARTIFACT}" >> "$GITHUB_OUTPUT"
 
-      - name: Build image (arm64, load to local docker)
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          platforms: linux/arm64
-          load: true
-          build-args: |
-            GOST_VERSION=${{ steps.get-gost-version.outputs.GOST_VERSION }}
-            WARP_VERSION=${{ steps.get-warp-client-version.outputs.WARP_VERSION }}
-            COMMIT_SHA=${{ github.sha }}
-          tags: ${{ steps.meta.outputs.IMAGE_TAG }}
-
-      - name: Save image to tar.gz
-        run: |
-          docker save "${{ steps.meta.outputs.IMAGE_TAG }}" | gzip > "${{ steps.meta.outputs.ARTIFACT }}"
-          ls -lh "${{ steps.meta.outputs.ARTIFACT }}"
-
-      - name: Create GitHub Release and upload artifact
+      - name: Create empty GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.TAG }}
@@ -91,12 +65,66 @@ jobs:
             Cloudflare WARP: `${{ steps.get-warp-client-version.outputs.WARP_VERSION }}`
             gost: `${{ steps.get-gost-version.outputs.GOST_VERSION }}`
             Commit: `${{ github.sha }}`
-            Architecture: `linux/arm64`
+            Architectures: `linux/arm64`, `linux/amd64`
 
             Load with:
             ```
-            gunzip -c ${{ steps.meta.outputs.ARTIFACT }} | docker load
+            gunzip -c warp-docker-<arch>-<git-tag>-<warp>-<gost>.tar.gz | docker load
             ```
+          make_latest: "true"
+
+  build:
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute artifact metadata
+        id: meta
+        run: |
+          WARP_VERSION="${{ needs.release.outputs.WARP_VERSION }}"
+          GOST_VERSION="${{ needs.release.outputs.GOST_VERSION }}"
+          GIT_REF="${{ github.ref_name }}"
+          ARCH="${{ matrix.arch }}"
+          IMAGE_TAG="warp-docker:${GIT_REF}-${WARP_VERSION}-${GOST_VERSION}-${ARCH}"
+          ARTIFACT="warp-docker-${ARCH}-${GIT_REF}-${WARP_VERSION}-${GOST_VERSION}.tar.gz"
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "ARTIFACT=${ARTIFACT}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image (load to local docker)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          load: true
+          build-args: |
+            GOST_VERSION=${{ needs.release.outputs.GOST_VERSION }}
+            WARP_VERSION=${{ needs.release.outputs.WARP_VERSION }}
+            COMMIT_SHA=${{ github.sha }}
+          tags: ${{ steps.meta.outputs.IMAGE_TAG }}
+
+      - name: Save image to tar.gz
+        run: |
+          docker save "${{ steps.meta.outputs.IMAGE_TAG }}" | gzip > "${{ steps.meta.outputs.ARTIFACT }}"
+          ls -lh "${{ steps.meta.outputs.ARTIFACT }}"
+
+      - name: Upload artifact to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release.outputs.TAG }}
           files: ${{ steps.meta.outputs.ARTIFACT }}
           fail_on_unmatched_files: true
-          make_latest: "true"
