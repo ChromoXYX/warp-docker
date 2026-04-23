@@ -87,6 +87,7 @@ jobs:
           tag_name: ${{ steps.meta.outputs.TAG }}
           name: ${{ steps.meta.outputs.TAG }}
           body: |
+            Git tag: `${{ github.ref_name }}`
             Cloudflare WARP: `${{ steps.get-warp-client-version.outputs.WARP_VERSION }}`
             gost: `${{ steps.get-gost-version.outputs.GOST_VERSION }}`
             Commit: `${{ github.sha }}`
@@ -99,5 +100,3 @@ jobs:
           files: ${{ steps.meta.outputs.ARTIFACT }}
           fail_on_unmatched_files: true
           make_latest: "true"
-Git tag: `${{ github.ref_name }}`
-            
