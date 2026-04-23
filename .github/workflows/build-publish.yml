@@ -1,4 +1,4 @@
-name: Build and publish Docker image
+name: Build and publish arm64 image to GitHub Release
 
 on:
   workflow_dispatch:
@@ -8,27 +8,18 @@ on:
         required: false
         type: string
 
+permissions:
+  contents: write
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          image: tonistiigi/binfmt:qemu-v7.0.0
+        uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      - name: Log into registry ${{ vars.REGISTRY }}
-        uses: docker/login-action@343f7c4344506bcbf9b4de18042ae17996df046d # v3.0.0
-        with:
-          registry: ${{ vars.REGISTRY }}
-          username: ${{ vars.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Get gost version
         id: get-gost-version
@@ -41,7 +32,6 @@ jobs:
 
       # gost version must be <number>.<number>.<number>
       - name: Verify gost version
-        id: verify-gost-version
         run: |
           if [[ ! "${{ steps.get-gost-version.outputs.GOST_VERSION }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Invalid gost version: ${{ steps.get-gost-version.outputs.GOST_VERSION }}"
@@ -54,36 +44,67 @@ jobs:
           curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
           echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
           sudo apt-get update
-          echo "WARP_VERSION=$(apt-cache show cloudflare-warp | grep '^Version:' | awk '{print $2}' | sed 's/-[0-9]*$//')" >> "$GITHUB_OUTPUT"
+          echo "WARP_VERSION=$(apt-cache show cloudflare-warp | grep '^Version:' | awk '{print $2}' | sed 's/-[0-9]*$//' | head -n1)" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push
+      - name: Compute release metadata
+        id: meta
+        run: |
+          WARP_VERSION="${{ steps.get-warp-client-version.outputs.WARP_VERSION }}"
+          GOST_VERSION="${{ steps.get-gost-version.outputs.GOST_VERSION }}"
+          TAG="v${WARP_VERSION}-${GOST_VERSION}"
+          IMAGE_TAG="warp-docker:${WARP_VERSION}-${GOST_VERSION}"
+          ARTIFACT="warp-docker-arm64-${WARP_VERSION}-${GOST_VERSION}.tar.gz"
+          echo "TAG=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "ARTIFACT=${ARTIFACT}" >> "$GITHUB_OUTPUT"
+
+      - name: Fail if release tag already exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.TAG }}
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}")
+          if [ "${status}" = "200" ]; then
+            echo "Release tag ${TAG} already exists. Aborting."
+            exit 1
+          fi
+          echo "Release tag ${TAG} does not exist (HTTP ${status}). Proceeding."
+
+      - name: Build image (arm64, load to local docker)
         uses: docker/build-push-action@v5
         with:
+          context: .
+          platforms: linux/arm64
+          load: true
           build-args: |
             GOST_VERSION=${{ steps.get-gost-version.outputs.GOST_VERSION }}
             WARP_VERSION=${{ steps.get-warp-client-version.outputs.WARP_VERSION }}
             COMMIT_SHA=${{ github.sha }}
-            
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}:latest
-            ${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}:${{ steps.get-warp-client-version.outputs.WARP_VERSION }}-${{ steps.get-gost-version.outputs.GOST_VERSION }}
-            ${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}:${{ steps.get-warp-client-version.outputs.WARP_VERSION }}-${{ steps.get-gost-version.outputs.GOST_VERSION }}-${{ github.sha }}
+          tags: ${{ steps.meta.outputs.IMAGE_TAG }}
 
-      - name: Build and push slim variant
-        uses: docker/build-push-action@v5
+      - name: Save image to tar.gz
+        run: |
+          docker save "${{ steps.meta.outputs.IMAGE_TAG }}" | gzip > "${{ steps.meta.outputs.ARTIFACT }}"
+          ls -lh "${{ steps.meta.outputs.ARTIFACT }}"
+
+      - name: Create GitHub Release and upload artifact
+        uses: softprops/action-gh-release@v2
         with:
-          build-args: |
-            GOST_VERSION=${{ steps.get-gost-version.outputs.GOST_VERSION }}
-            WARP_VERSION=${{ steps.get-warp-client-version.outputs.WARP_VERSION }}
-            COMMIT_SHA=${{ github.sha }}
-            BASE_IMAGE=debian:bookworm-slim
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}:slim-latest
-            ${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}:slim-${{ steps.get-warp-client-version.outputs.WARP_VERSION }}-${{ steps.get-gost-version.outputs.GOST_VERSION }}
-            ${{ vars.REGISTRY }}/${{ vars.IMAGE_NAME }}:slim-${{ steps.get-warp-client-version.outputs.WARP_VERSION }}-${{ steps.get-gost-version.outputs.GOST_VERSION }}-${{ github.sha }}
+          tag_name: ${{ steps.meta.outputs.TAG }}
+          name: ${{ steps.meta.outputs.TAG }}
+          body: |
+            Cloudflare WARP: `${{ steps.get-warp-client-version.outputs.WARP_VERSION }}`
+            gost: `${{ steps.get-gost-version.outputs.GOST_VERSION }}`
+            Commit: `${{ github.sha }}`
+            Architecture: `linux/arm64`
+
+            Load with:
+            ```
+            gunzip -c ${{ steps.meta.outputs.ARTIFACT }} | docker load
+            ```
+          files: ${{ steps.meta.outputs.ARTIFACT }}
+          fail_on_unmatched_files: true
+          make_latest: "true"
